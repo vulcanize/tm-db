@@ -182,3 +182,19 @@ func (db *GoLevelDB) ReverseIterator(start, end []byte) (tmdb.Iterator, error) {
 	itr := db.db.NewIterator(&util.Range{Start: start, Limit: end}, nil)
 	return newGoLevelDBIterator(itr, start, end, true), nil
 }
+
+func (db *GoLevelDB) InitialVersion() uint64 {
+	return 1
+}
+
+func (db *GoLevelDB) CurrentVersion() uint64 {
+	return db.InitialVersion()
+}
+
+func (db *GoLevelDB) AtVersion(uint64) (tmdb.DB, error) {
+	return db, nil
+}
+
+func (db *GoLevelDB) SaveVersion() uint64 {
+	panic("Versioning not implemented for GoLevelDB")
+}

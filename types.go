@@ -11,6 +11,9 @@ var (
 
 	// ErrValueNil is returned when attempting to set a nil value.
 	ErrValueNil = errors.New("value cannot be nil")
+
+	// ErrVersionDoesNotExist is returned when a DB version does not exist
+	ErrVersionDoesNotExist = errors.New("version does not exist")
 )
 
 // DB is the main interface for all database backends. DBs are concurrency-safe. Callers must call
@@ -68,6 +71,20 @@ type DB interface {
 
 	// Stats returns a map of property values for all keys and the size of the cache.
 	Stats() map[string]string
+
+	// ID of current version of database contents
+	CurrentVersion() uint64
+
+	// Get a view of the database at a previous version
+	// Fails if current version is requested (TODO)
+	AtVersion(uint64) (DB, error)
+
+	// ID of first saved version of database
+	// TODO: guarantee next = (prev+1)?
+	InitialVersion() uint64
+
+	// Save the current version of the database and return its ID
+	SaveVersion() uint64
 }
 
 // Batch represents a group of writes. They may or may not be written atomically depending on the

@@ -185,3 +185,61 @@ func (db *MemDB) ReverseIterator(start, end []byte) (tmdb.Iterator, error) {
 	}
 	return newMemDBIterator(db, start, end, true), nil
 }
+
+func (db *MemDB) InitialVersion() uint64 {
+	return 0
+}
+
+func (db *MemDB) CurrentVersion() uint64 {
+	return db.InitialVersion()
+}
+
+func (db *MemDB) AtVersion(uint64) (tmdb.DB, error) {
+	return db, nil
+}
+
+func (db *MemDB) SaveVersion() uint64 {
+	panic("Versioning not implemented for MemDB")
+}
+
+// Naive implementation of versioned DB for testing purposes
+type VersionedDB struct {
+	MemDB
+	saved []*btree.BTree
+}
+
+var _ tmdb.DB = (*VersionedDB)(nil)
+
+// NewVersionedDB creates a new in-memory database with basic versioning support.
+func NewVersionedDB() *VersionedDB {
+	return &VersionedDB{MemDB: *NewDB()}
+}
+
+func (db *VersionedDB) InitialVersion() uint64 {
+	return 1
+}
+
+func (db *VersionedDB) CurrentVersion() uint64 {
+	return uint64(len(db.saved)) + db.InitialVersion()
+}
+
+func (db *VersionedDB) AtVersion(version uint64) (tmdb.DB, error) {
+	if version <= 0 {
+		return nil, tmdb.ErrVersionDoesNotExist
+	}
+	// allows AtVersion(current), desired? todo
+	if version == db.CurrentVersion() {
+		return &db.MemDB, nil
+	}
+	return &MemDB{btree: db.saved[version-1]}, nil
+}
+
+// Uses BTree's Clone() method to make a CoW clone of the current data
+func (db *VersionedDB) SaveVersion() uint64 {
+	db.MemDB.mtx.Lock()
+	defer db.MemDB.mtx.Unlock()
+	id := db.CurrentVersion()
+	db.saved = append(db.saved, db.btree)
+	db.MemDB.btree = db.btree.Clone()
+	return id
+}

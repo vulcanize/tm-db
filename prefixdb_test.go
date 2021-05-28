@@ -9,8 +9,7 @@ import (
 	"github.com/tendermint/tm-db/memdb"
 )
 
-func mockDBWithStuff(t *testing.T) tmdb.DB {
-	db := memdb.NewDB()
+func fillMockDBWithStuff(t *testing.T, db tmdb.DB) {
 	// Under "key" prefix
 	require.NoError(t, db.Set([]byte("key"), []byte("value")))
 	require.NoError(t, db.Set([]byte("key1"), []byte("value1")))
@@ -20,6 +19,11 @@ func mockDBWithStuff(t *testing.T) tmdb.DB {
 	require.NoError(t, db.Set([]byte("k"), []byte("val")))
 	require.NoError(t, db.Set([]byte("ke"), []byte("valu")))
 	require.NoError(t, db.Set([]byte("kee"), []byte("valuu")))
+}
+
+func mockDBWithStuff(t *testing.T) tmdb.DB {
+	db := memdb.NewDB()
+	fillMockDBWithStuff(t, db)
 	return db
 }
 
@@ -117,4 +121,22 @@ func TestPrefixDBReverseIterator7(t *testing.T) {
 	dbtest.Next(t, itr, false)
 	dbtest.Invalid(t, itr)
 	itr.Close()
+}
+
+func TestPrefixDBViewVersion(t *testing.T) {
+	db := memdb.NewVersionedDB()
+	fillMockDBWithStuff(t, db)
+	pdb := tmdb.NewPrefixDB(db, []byte("key"))
+	id := pdb.SaveVersion()
+
+	pdb.Set([]byte("1"), []byte("newvalue1"))
+	pdb.Delete([]byte("2"))
+	pdb.Set([]byte("4"), []byte("newvalue4"))
+
+	view, err := pdb.AtVersion(id)
+	require.NoError(t, err)
+
+	dbtest.Value(t, view, []byte("1"), []byte("value1"))
+	dbtest.Value(t, view, []byte("2"), []byte("value2"))
+	dbtest.Value(t, view, []byte("4"), nil)
 }

@@ -199,6 +199,26 @@ func (pdb *PrefixDB) Stats() map[string]string {
 	return stats
 }
 
+func (pdb *PrefixDB) InitialVersion() uint64 {
+	return pdb.db.InitialVersion()
+}
+
+func (pdb *PrefixDB) CurrentVersion() uint64 {
+	return pdb.db.CurrentVersion()
+}
+
+func (pdb *PrefixDB) AtVersion(version uint64) (DB, error) {
+	at, err := pdb.db.AtVersion(version)
+	if err != nil {
+		return nil, err
+	}
+	return NewPrefixDB(at, pdb.prefix), nil
+}
+
+func (pdb *PrefixDB) SaveVersion() uint64 {
+	return pdb.db.SaveVersion()
+}
+
 func (pdb *PrefixDB) prefixed(key []byte) []byte {
 	return append(cp(pdb.prefix), key...)
 }
