@@ -27,7 +27,7 @@ type memDBIterator struct {
 var _ tmdb.Iterator = (*memDBIterator)(nil)
 
 // newMemDBIterator creates a new memDBIterator.
-func newMemDBIterator(db *MemDB, start []byte, end []byte, reverse bool) *memDBIterator {
+func newMemDBIterator(db *dbVersion, start []byte, end []byte, reverse bool) *memDBIterator {
 	ctx, cancel := context.WithCancel(context.Background())
 	ch := make(chan *item, chBufferSize)
 	iter := &memDBIterator{

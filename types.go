@@ -16,12 +16,51 @@ var (
 	ErrVersionDoesNotExist = errors.New("version does not exist")
 )
 
-// DB is the main interface for all database backends. DBs are concurrency-safe. Callers must call
-// Close on the database when done.
+// Represents a connection to a versioned database.
+// K/V access is defined on the transaction objects
+// Past versions are read-only
+// TODO: rename to Connection?
+type DB interface {
+	// Open a read-only transaction at a specified version
+	NewReaderAt(uint64) (DBReader, error)
+
+	// Open a read-write transaction at the current version
+	NewWriter() DBWriter
+
+	// ID of current version of database contents
+	CurrentVersion() uint64
+
+	// ID of first saved version of database
+	InitialVersion() uint64
+
+	// Save the current version of the database and return its ID
+	// TODO: design q's
+	// 1. DBWriter.Commit() saves versions
+	//    - with multiple writers, version sequence could go out of sync
+	// 2. SaveVersion() only
+	//    - must wait until outstanding txns complete
+	//    - version sequence well defined, easier to reason about
+	SaveVersion() uint64
+
+	// Print is used for debugging.
+	// TODO: surely this can be done via iteration?
+	// Print() error
+
+	// Stats returns a map of property values for all keys and the size of the cache.
+	Stats() map[string]string
+
+	// Close closes the database connection.
+	Close() error
+}
+
+// TODO: rename to batch/transaction?
+// The main DB access interface. Follows BadgerDB semantics , batches are
+// concurrency-safe, and produce errors on write conflicts.
+// Callers must call Close on the batch when done.
 //
 // Keys cannot be nil or empty, while values cannot be nil. Keys and values should be considered
 // read-only, both when returned and when given, and must be copied before they are modified.
-type DB interface {
+type DBReader interface {
 	// Get fetches the value of the given key, or nil if it does not exist.
 	// CONTRACT: key, value readonly []byte
 	Get([]byte) ([]byte, error)
@@ -29,20 +68,6 @@ type DB interface {
 	// Has checks if a key exists.
 	// CONTRACT: key, value readonly []byte
 	Has(key []byte) (bool, error)
-
-	// Set sets the value for the given key, replacing it if it already exists.
-	// CONTRACT: key, value readonly []byte
-	Set([]byte, []byte) error
-
-	// SetSync sets the value for the given key, and flushes it to storage before returning.
-	SetSync([]byte, []byte) error
-
-	// Delete deletes the key, or does nothing if the key does not exist.
-	// CONTRACT: key readonly []byte
-	Delete([]byte) error
-
-	// DeleteSync deletes the key, and flushes the delete to storage before returning.
-	DeleteSync([]byte) error
 
 	// Iterator returns an iterator over a domain of keys, in ascending order. The caller must call
 	// Close when done. End is exclusive, and start must be less than end. A nil start iterates
@@ -60,57 +85,22 @@ type DB interface {
 	// CONTRACT: start, end readonly []byte
 	ReverseIterator(start, end []byte) (Iterator, error)
 
-	// Close closes the database connection.
-	Close() error
-
-	// NewBatch creates a batch for atomic updates. The caller must call Batch.Close.
-	NewBatch() Batch
-
-	// Print is used for debugging.
-	Print() error
-
-	// Stats returns a map of property values for all keys and the size of the cache.
-	Stats() map[string]string
-
-	// ID of current version of database contents
-	CurrentVersion() uint64
-
-	// Get a view of the database at a previous version
-	// Fails if current version is requested (TODO)
-	AtVersion(uint64) (DB, error)
-
-	// ID of first saved version of database
-	// TODO: guarantee next = (prev+1)?
-	InitialVersion() uint64
-
-	// Save the current version of the database and return its ID
-	SaveVersion() uint64
+	// Commit and close the transaction. No-op for read-only batch.
+	// TODO: move to ReadWriter? replace with Discard() or equiv?
+	Commit() error
 }
 
-// Batch represents a group of writes. They may or may not be written atomically depending on the
-// backend. Callers must call Close on the batch when done.
-//
-// As with DB, given keys and values should be considered read-only, and must not be modified after
-// passing them to the batch.
-type Batch interface {
-	// Set sets a key/value pair.
+// A batch/transaction that is also capable of writing to the backing DB.
+type DBWriter interface {
+	DBReader
+
+	// Set sets the value for the given key, replacing it if it already exists.
 	// CONTRACT: key, value readonly []byte
-	Set(key, value []byte) error
+	Set([]byte, []byte) error
 
-	// Delete deletes a key/value pair.
+	// Delete deletes the key, or does nothing if the key does not exist.
 	// CONTRACT: key readonly []byte
-	Delete(key []byte) error
-
-	// Write writes the batch, possibly without flushing to disk. Only Close() can be called after,
-	// other methods will error.
-	Write() error
-
-	// WriteSync writes the batch and flushes it to disk. Only Close() can be called after, other
-	// methods will error.
-	WriteSync() error
-
-	// Close closes the batch. It is idempotent, but calls to other methods afterwards will error.
-	Close() error
+	Delete([]byte) error
 }
 
 // Iterator represents an iterator over a domain of keys. Callers must call Close when done.

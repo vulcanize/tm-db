@@ -1,224 +1,133 @@
 package db
 
-import (
-	"fmt"
-	"sync"
-)
-
-// PrefixDB wraps a namespace of another database as a logical database.
-type PrefixDB struct {
-	mtx    sync.Mutex
+// Prefix Reader/Writer lets you namespace multiple DBs within a single DB.
+type PrefixReader struct {
+	db     DBReader
 	prefix []byte
-	db     DB
 }
 
-var _ DB = (*PrefixDB)(nil)
+type PrefixWriter struct {
+	db     DBWriter
+	prefix []byte
+}
 
-// NewPrefixDB lets you namespace multiple DBs within a single DB.
-func NewPrefixDB(db DB, prefix []byte) *PrefixDB {
-	return &PrefixDB{
+var _ DBReader = (*PrefixReader)(nil)
+var _ DBWriter = (*PrefixWriter)(nil)
+
+func NewPrefixReader(db DBReader, prefix []byte) *PrefixReader {
+	return &PrefixReader{
 		prefix: prefix,
 		db:     db,
 	}
 }
 
-// Get implements DB.
-func (pdb *PrefixDB) Get(key []byte) ([]byte, error) {
+func NewPrefixWriter(db DBWriter, prefix []byte) *PrefixWriter {
+	return &PrefixWriter{
+		prefix: prefix,
+		db:     db,
+	}
+}
+
+func prefixed(prefix []byte, key []byte) []byte {
+	return append(prefix, key...)
+}
+
+// Get implements DBReader.
+func (pdb *PrefixReader) Get(key []byte) ([]byte, error) {
 	if len(key) == 0 {
 		return nil, ErrKeyEmpty
 	}
-	pdb.mtx.Lock()
-	defer pdb.mtx.Unlock()
-
-	pkey := pdb.prefixed(key)
-	value, err := pdb.db.Get(pkey)
-	if err != nil {
-		return nil, err
-	}
-	return value, nil
+	return pdb.db.Get(prefixed(pdb.prefix, key))
 }
 
-// Has implements DB.
-func (pdb *PrefixDB) Has(key []byte) (bool, error) {
+// Has implements DBReader.
+func (pdb *PrefixReader) Has(key []byte) (bool, error) {
 	if len(key) == 0 {
 		return false, ErrKeyEmpty
 	}
-	pdb.mtx.Lock()
-	defer pdb.mtx.Unlock()
-
-	ok, err := pdb.db.Has(pdb.prefixed(key))
-	if err != nil {
-		return ok, err
-	}
-
-	return ok, nil
+	return pdb.db.Has(prefixed(pdb.prefix, key))
 }
 
-// Set implements DB.
-func (pdb *PrefixDB) Set(key []byte, value []byte) error {
-	if len(key) == 0 {
-		return ErrKeyEmpty
-	}
-	if value == nil {
-		return ErrValueNil
-	}
-	pdb.mtx.Lock()
-	defer pdb.mtx.Unlock()
-
-	pkey := pdb.prefixed(key)
-	if err := pdb.db.Set(pkey, value); err != nil {
-		return err
-	}
-	return nil
-}
-
-// SetSync implements DB.
-func (pdb *PrefixDB) SetSync(key []byte, value []byte) error {
-	if len(key) == 0 {
-		return ErrKeyEmpty
-	}
-	if value == nil {
-		return ErrValueNil
-	}
-	pdb.mtx.Lock()
-	defer pdb.mtx.Unlock()
-
-	return pdb.db.SetSync(pdb.prefixed(key), value)
-}
-
-// Delete implements DB.
-func (pdb *PrefixDB) Delete(key []byte) error {
-	if len(key) == 0 {
-		return ErrKeyEmpty
-	}
-	pdb.mtx.Lock()
-	defer pdb.mtx.Unlock()
-
-	return pdb.db.Delete(pdb.prefixed(key))
-}
-
-// DeleteSync implements DB.
-func (pdb *PrefixDB) DeleteSync(key []byte) error {
-	if len(key) == 0 {
-		return ErrKeyEmpty
-	}
-	pdb.mtx.Lock()
-	defer pdb.mtx.Unlock()
-
-	return pdb.db.DeleteSync(pdb.prefixed(key))
-}
-
-// Iterator implements DB.
-func (pdb *PrefixDB) Iterator(start, end []byte) (Iterator, error) {
+// Iterator implements DBReader.
+func (pdb *PrefixReader) Iterator(start, end []byte) (Iterator, error) {
 	if (start != nil && len(start) == 0) || (end != nil && len(end) == 0) {
 		return nil, ErrKeyEmpty
 	}
-	pdb.mtx.Lock()
-	defer pdb.mtx.Unlock()
 
-	var pstart, pend []byte
-	pstart = append(cp(pdb.prefix), start...)
+	var pend []byte
 	if end == nil {
 		pend = cpIncr(pdb.prefix)
 	} else {
-		pend = append(cp(pdb.prefix), end...)
+		pend = prefixed(pdb.prefix, end)
 	}
-	itr, err := pdb.db.Iterator(pstart, pend)
+	itr, err := pdb.db.Iterator(prefixed(pdb.prefix, start), pend)
 	if err != nil {
 		return nil, err
 	}
-
 	return newPrefixIterator(pdb.prefix, start, end, itr)
 }
 
-// ReverseIterator implements DB.
-func (pdb *PrefixDB) ReverseIterator(start, end []byte) (Iterator, error) {
+// ReverseIterator implements DBReader.
+func (pdb *PrefixReader) ReverseIterator(start, end []byte) (Iterator, error) {
 	if (start != nil && len(start) == 0) || (end != nil && len(end) == 0) {
 		return nil, ErrKeyEmpty
 	}
-	pdb.mtx.Lock()
-	defer pdb.mtx.Unlock()
 
-	var pstart, pend []byte
-	pstart = append(cp(pdb.prefix), start...)
+	var pend []byte
 	if end == nil {
 		pend = cpIncr(pdb.prefix)
 	} else {
-		pend = append(cp(pdb.prefix), end...)
+		pend = prefixed(pdb.prefix, end)
 	}
-	ritr, err := pdb.db.ReverseIterator(pstart, pend)
+	ritr, err := pdb.db.ReverseIterator(prefixed(pdb.prefix, start), pend)
 	if err != nil {
 		return nil, err
 	}
-
 	return newPrefixIterator(pdb.prefix, start, end, ritr)
 }
 
-// NewBatch implements DB.
-func (pdb *PrefixDB) NewBatch() Batch {
-	pdb.mtx.Lock()
-	defer pdb.mtx.Unlock()
-
-	return newPrefixBatch(pdb.prefix, pdb.db.NewBatch())
+// Close implements DBReader.
+func (pdb *PrefixReader) Commit() error {
+	return pdb.db.Commit()
 }
 
-// Close implements DB.
-func (pdb *PrefixDB) Close() error {
-	pdb.mtx.Lock()
-	defer pdb.mtx.Unlock()
-
-	return pdb.db.Close()
-}
-
-// Print implements DB.
-func (pdb *PrefixDB) Print() error {
-	fmt.Printf("prefix: %X\n", pdb.prefix)
-
-	itr, err := pdb.Iterator(nil, nil)
-	if err != nil {
-		return err
+// Set implements DBWriter.
+func (pdb *PrefixWriter) Set(key []byte, value []byte) error {
+	if len(key) == 0 {
+		return ErrKeyEmpty
 	}
-	defer itr.Close()
-	for ; itr.Valid(); itr.Next() {
-		key := itr.Key()
-		value := itr.Value()
-		fmt.Printf("[%X]:\t[%X]\n", key, value)
+	return pdb.db.Set(prefixed(pdb.prefix, key), value)
+}
+
+// Delete implements DBWriter.
+func (pdb *PrefixWriter) Delete(key []byte) error {
+	if len(key) == 0 {
+		return ErrKeyEmpty
 	}
-	return nil
+	return pdb.db.Delete(prefixed(pdb.prefix, key))
 }
 
-// Stats implements DB.
-func (pdb *PrefixDB) Stats() map[string]string {
-	stats := make(map[string]string)
-	stats["prefixdb.prefix.string"] = string(pdb.prefix)
-	stats["prefixdb.prefix.hex"] = fmt.Sprintf("%X", pdb.prefix)
-	source := pdb.db.Stats()
-	for key, value := range source {
-		stats["prefixdb.source."+key] = value
-	}
-	return stats
+// Get implements DBWriter.
+func (pdb *PrefixWriter) Get(key []byte) ([]byte, error) {
+	return NewPrefixReader(pdb.db, pdb.prefix).Get(key)
 }
 
-func (pdb *PrefixDB) InitialVersion() uint64 {
-	return pdb.db.InitialVersion()
+// Has implements DBWriter.
+func (pdb *PrefixWriter) Has(key []byte) (bool, error) {
+	return NewPrefixReader(pdb.db, pdb.prefix).Has(key)
 }
 
-func (pdb *PrefixDB) CurrentVersion() uint64 {
-	return pdb.db.CurrentVersion()
+// Iterator implements DBWriter.
+func (pdb *PrefixWriter) Iterator(start, end []byte) (Iterator, error) {
+	return NewPrefixReader(pdb.db, pdb.prefix).Iterator(start, end)
 }
 
-func (pdb *PrefixDB) AtVersion(version uint64) (DB, error) {
-	at, err := pdb.db.AtVersion(version)
-	if err != nil {
-		return nil, err
-	}
-	return NewPrefixDB(at, pdb.prefix), nil
+// ReverseIterator implements DBWriter.
+func (pdb *PrefixWriter) ReverseIterator(start, end []byte) (Iterator, error) {
+	return NewPrefixReader(pdb.db, pdb.prefix).ReverseIterator(start, end)
 }
 
-func (pdb *PrefixDB) SaveVersion() uint64 {
-	return pdb.db.SaveVersion()
-}
-
-func (pdb *PrefixDB) prefixed(key []byte) []byte {
-	return append(cp(pdb.prefix), key...)
+// Close implements DBWriter.
+func (pdb *PrefixWriter) Commit() error {
+	return pdb.db.Commit()
 }

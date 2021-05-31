@@ -9,7 +9,7 @@ import (
 	"github.com/tendermint/tm-db/memdb"
 )
 
-func fillMockDBWithStuff(t *testing.T, db tmdb.DB) {
+func fillDBWithStuff(t *testing.T, db tmdb.DBWriter) {
 	// Under "key" prefix
 	require.NoError(t, db.Set([]byte("key"), []byte("value")))
 	require.NoError(t, db.Set([]byte("key1"), []byte("value1")))
@@ -23,13 +23,18 @@ func fillMockDBWithStuff(t *testing.T, db tmdb.DB) {
 
 func mockDBWithStuff(t *testing.T) tmdb.DB {
 	db := memdb.NewDB()
-	fillMockDBWithStuff(t, db)
+	fillDBWithStuff(t, db.NewWriter())
 	return db
 }
 
+func makePrefixReader(t *testing.T, db tmdb.DB, pre []byte) tmdb.DBReader {
+	view, err := db.NewReaderAt(db.CurrentVersion())
+	require.NoError(t, err)
+	return tmdb.NewPrefixReader(view, pre)
+}
+
 func TestPrefixDBSimple(t *testing.T) {
-	db := mockDBWithStuff(t)
-	pdb := tmdb.NewPrefixDB(db, []byte("key"))
+	pdb := makePrefixReader(t, mockDBWithStuff(t), []byte("key"))
 
 	dbtest.Value(t, pdb, []byte("key"), nil)
 	dbtest.Value(t, pdb, []byte("key1"), nil)
@@ -45,8 +50,7 @@ func TestPrefixDBSimple(t *testing.T) {
 }
 
 func TestPrefixDBIterator1(t *testing.T) {
-	db := mockDBWithStuff(t)
-	pdb := tmdb.NewPrefixDB(db, []byte("key"))
+	pdb := makePrefixReader(t, mockDBWithStuff(t), []byte("key"))
 
 	itr, err := pdb.Iterator(nil, nil)
 	require.NoError(t, err)
@@ -62,8 +66,7 @@ func TestPrefixDBIterator1(t *testing.T) {
 }
 
 func TestPrefixDBReverseIterator1(t *testing.T) {
-	db := mockDBWithStuff(t)
-	pdb := tmdb.NewPrefixDB(db, []byte("key"))
+	pdb := makePrefixReader(t, mockDBWithStuff(t), []byte("key"))
 
 	itr, err := pdb.ReverseIterator(nil, nil)
 	require.NoError(t, err)
@@ -79,8 +82,7 @@ func TestPrefixDBReverseIterator1(t *testing.T) {
 }
 
 func TestPrefixDBReverseIterator5(t *testing.T) {
-	db := mockDBWithStuff(t)
-	pdb := tmdb.NewPrefixDB(db, []byte("key"))
+	pdb := makePrefixReader(t, mockDBWithStuff(t), []byte("key"))
 
 	itr, err := pdb.ReverseIterator([]byte("1"), nil)
 	require.NoError(t, err)
@@ -96,8 +98,7 @@ func TestPrefixDBReverseIterator5(t *testing.T) {
 }
 
 func TestPrefixDBReverseIterator6(t *testing.T) {
-	db := mockDBWithStuff(t)
-	pdb := tmdb.NewPrefixDB(db, []byte("key"))
+	pdb := makePrefixReader(t, mockDBWithStuff(t), []byte("key"))
 
 	itr, err := pdb.ReverseIterator([]byte("2"), nil)
 	require.NoError(t, err)
@@ -111,8 +112,7 @@ func TestPrefixDBReverseIterator6(t *testing.T) {
 }
 
 func TestPrefixDBReverseIterator7(t *testing.T) {
-	db := mockDBWithStuff(t)
-	pdb := tmdb.NewPrefixDB(db, []byte("key"))
+	pdb := makePrefixReader(t, mockDBWithStuff(t), []byte("key"))
 
 	itr, err := pdb.ReverseIterator(nil, []byte("2"))
 	require.NoError(t, err)
@@ -124,16 +124,19 @@ func TestPrefixDBReverseIterator7(t *testing.T) {
 }
 
 func TestPrefixDBViewVersion(t *testing.T) {
-	db := memdb.NewVersionedDB()
-	fillMockDBWithStuff(t, db)
-	pdb := tmdb.NewPrefixDB(db, []byte("key"))
-	id := pdb.SaveVersion()
+	prefix := []byte("key")
+	db := memdb.NewDB()
+	fillDBWithStuff(t, db)
+	id := db.SaveVersion()
+	pdb := tmdb.NewPrefixWriter(db.NewWriter(), prefix)
 
 	pdb.Set([]byte("1"), []byte("newvalue1"))
 	pdb.Delete([]byte("2"))
 	pdb.Set([]byte("4"), []byte("newvalue4"))
 
-	view, err := pdb.AtVersion(id)
+	dbview, err := db.NewReaderAt(id)
+	require.NoError(t, err)
+	view := tmdb.NewPrefixReader(dbview, prefix)
 	require.NoError(t, err)
 
 	dbtest.Value(t, view, []byte("1"), []byte("value1"))

@@ -58,7 +58,7 @@ func KeyPanics(t *testing.T, itr tmdb.Iterator) {
 	assert.Panics(t, func() { itr.Key() }, "checkKeyPanics expected panic but didn't")
 }
 
-func Value(t *testing.T, db tmdb.DB, key []byte, valueWanted []byte) {
+func Value(t *testing.T, db tmdb.DBReader, key []byte, valueWanted []byte) {
 	valueGot, err := db.Get(key)
 	assert.NoError(t, err)
 	assert.Equal(t, valueWanted, valueGot)
@@ -111,7 +111,7 @@ func Bytes2Int64(buf []byte) int64 {
 	return int64(binary.BigEndian.Uint64(buf))
 }
 
-func BenchmarkRangeScans(b *testing.B, db tmdb.DB, dbSize int64) {
+func BenchmarkRangeScans(b *testing.B, db tmdb.DBWriter, dbSize int64) {
 	b.StopTimer()
 
 	rangeSize := int64(10000)
@@ -144,7 +144,7 @@ func BenchmarkRangeScans(b *testing.B, db tmdb.DB, dbSize int64) {
 	}
 }
 
-func BenchmarkRandomReadsWrites(b *testing.B, db tmdb.DB) {
+func BenchmarkRandomReadsWrites(b *testing.B, db tmdb.DBWriter) {
 	b.StopTimer()
 
 	// create dummy data

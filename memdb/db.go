@@ -43,23 +43,69 @@ func newPair(key, value []byte) *item {
 // database, so modifying them will cause the stored values to be modified as well. All DB methods
 // already specify that keys and values should be considered read-only, but this is especially
 // important with MemDB.
-type MemDB struct {
+type dbVersion struct {
 	mtx   sync.RWMutex
 	btree *btree.BTree
 }
 
+// Naive implementation of versioned DB for testing purposes
+type MemDB struct {
+	dbVersion
+	saved []*btree.BTree
+}
+
 var _ tmdb.DB = (*MemDB)(nil)
+var _ tmdb.DBReader = (*dbVersion)(nil)
+var _ tmdb.DBWriter = (*dbVersion)(nil)
 
 // NewDB creates a new in-memory database.
 func NewDB() *MemDB {
-	database := &MemDB{
-		btree: btree.New(bTreeDegree),
+	return &MemDB{dbVersion: dbVersion{btree: btree.New(bTreeDegree)}}
+}
+
+// Close implements DB.
+func (db *MemDB) Close() error {
+	// Close is a noop since for an in-memory database, we don't have a destination to flush
+	// contents to nor do we want any data loss on invoking Close().
+	// See the discussion in https://github.com/tendermint/tendermint/libs/pull/56
+	return nil
+}
+
+func (db *MemDB) InitialVersion() uint64 {
+	return 1
+}
+
+func (db *MemDB) CurrentVersion() uint64 {
+	return uint64(len(db.saved)) + db.InitialVersion()
+}
+
+func (db *MemDB) NewReaderAt(version uint64) (tmdb.DBReader, error) {
+	if version <= 0 {
+		return nil, tmdb.ErrVersionDoesNotExist
 	}
-	return database
+	// allows AtVersion(current), desired? todo
+	if version == db.CurrentVersion() {
+		return &db.dbVersion, nil
+	}
+	return &dbVersion{btree: db.saved[version-1]}, nil
+}
+
+func (db *MemDB) NewWriter() tmdb.DBWriter {
+	return &db.dbVersion
+}
+
+func (db *MemDB) SaveVersion() uint64 {
+	db.dbVersion.mtx.Lock()
+	defer db.dbVersion.mtx.Unlock()
+	id := db.CurrentVersion()
+	db.saved = append(db.saved, db.btree)
+	// BTree's Clone() makes a CoW cloned ref of the current data
+	db.dbVersion.btree = db.btree.Clone()
+	return id
 }
 
 // Get implements DB.
-func (db *MemDB) Get(key []byte) ([]byte, error) {
+func (db *dbVersion) Get(key []byte) ([]byte, error) {
 	if len(key) == 0 {
 		return nil, tmdb.ErrKeyEmpty
 	}
@@ -74,7 +120,7 @@ func (db *MemDB) Get(key []byte) ([]byte, error) {
 }
 
 // Has implements DB.
-func (db *MemDB) Has(key []byte) (bool, error) {
+func (db *dbVersion) Has(key []byte) (bool, error) {
 	if len(key) == 0 {
 		return false, tmdb.ErrKeyEmpty
 	}
@@ -85,7 +131,7 @@ func (db *MemDB) Has(key []byte) (bool, error) {
 }
 
 // Set implements DB.
-func (db *MemDB) Set(key []byte, value []byte) error {
+func (db *dbVersion) Set(key []byte, value []byte) error {
 	if len(key) == 0 {
 		return tmdb.ErrKeyEmpty
 	}
@@ -100,17 +146,12 @@ func (db *MemDB) Set(key []byte, value []byte) error {
 }
 
 // set sets a value without locking the mutex.
-func (db *MemDB) set(key []byte, value []byte) {
+func (db *dbVersion) set(key []byte, value []byte) {
 	db.btree.ReplaceOrInsert(newPair(key, value))
 }
 
-// SetSync implements DB.
-func (db *MemDB) SetSync(key []byte, value []byte) error {
-	return db.Set(key, value)
-}
-
 // Delete implements DB.
-func (db *MemDB) Delete(key []byte) error {
+func (db *dbVersion) Delete(key []byte) error {
 	if len(key) == 0 {
 		return tmdb.ErrKeyEmpty
 	}
@@ -122,20 +163,30 @@ func (db *MemDB) Delete(key []byte) error {
 }
 
 // delete deletes a key without locking the mutex.
-func (db *MemDB) delete(key []byte) {
+func (db *dbVersion) delete(key []byte) {
 	db.btree.Delete(newKey(key))
 }
 
-// DeleteSync implements DB.
-func (db *MemDB) DeleteSync(key []byte) error {
-	return db.Delete(key)
+// Iterator implements DB.
+// Takes out a read-lock on the database until the iterator is closed.
+func (db *dbVersion) Iterator(start, end []byte) (tmdb.Iterator, error) {
+	if (start != nil && len(start) == 0) || (end != nil && len(end) == 0) {
+		return nil, tmdb.ErrKeyEmpty
+	}
+	return newMemDBIterator(db, start, end, false), nil
 }
 
-// Close implements DB.
-func (db *MemDB) Close() error {
-	// Close is a noop since for an in-memory database, we don't have a destination to flush
-	// contents to nor do we want any data loss on invoking Close().
-	// See the discussion in https://github.com/tendermint/tendermint/libs/pull/56
+// ReverseIterator implements DB.
+// Takes out a read-lock on the database until the iterator is closed.
+func (db *dbVersion) ReverseIterator(start, end []byte) (tmdb.Iterator, error) {
+	if (start != nil && len(start) == 0) || (end != nil && len(end) == 0) {
+		return nil, tmdb.ErrKeyEmpty
+	}
+	return newMemDBIterator(db, start, end, true), nil
+}
+
+func (db *dbVersion) Commit() error {
+	// no-op, like Close()
 	return nil
 }
 
@@ -161,85 +212,4 @@ func (db *MemDB) Stats() map[string]string {
 	stats["database.type"] = "memDB"
 	stats["database.size"] = fmt.Sprintf("%d", db.btree.Len())
 	return stats
-}
-
-// NewBatch implements DB.
-func (db *MemDB) NewBatch() tmdb.Batch {
-	return newMemDBBatch(db)
-}
-
-// Iterator implements DB.
-// Takes out a read-lock on the database until the iterator is closed.
-func (db *MemDB) Iterator(start, end []byte) (tmdb.Iterator, error) {
-	if (start != nil && len(start) == 0) || (end != nil && len(end) == 0) {
-		return nil, tmdb.ErrKeyEmpty
-	}
-	return newMemDBIterator(db, start, end, false), nil
-}
-
-// ReverseIterator implements DB.
-// Takes out a read-lock on the database until the iterator is closed.
-func (db *MemDB) ReverseIterator(start, end []byte) (tmdb.Iterator, error) {
-	if (start != nil && len(start) == 0) || (end != nil && len(end) == 0) {
-		return nil, tmdb.ErrKeyEmpty
-	}
-	return newMemDBIterator(db, start, end, true), nil
-}
-
-func (db *MemDB) InitialVersion() uint64 {
-	return 0
-}
-
-func (db *MemDB) CurrentVersion() uint64 {
-	return db.InitialVersion()
-}
-
-func (db *MemDB) AtVersion(uint64) (tmdb.DB, error) {
-	return db, nil
-}
-
-func (db *MemDB) SaveVersion() uint64 {
-	panic("Versioning not implemented for MemDB")
-}
-
-// Naive implementation of versioned DB for testing purposes
-type VersionedDB struct {
-	MemDB
-	saved []*btree.BTree
-}
-
-var _ tmdb.DB = (*VersionedDB)(nil)
-
-// NewVersionedDB creates a new in-memory database with basic versioning support.
-func NewVersionedDB() *VersionedDB {
-	return &VersionedDB{MemDB: *NewDB()}
-}
-
-func (db *VersionedDB) InitialVersion() uint64 {
-	return 1
-}
-
-func (db *VersionedDB) CurrentVersion() uint64 {
-	return uint64(len(db.saved)) + db.InitialVersion()
-}
-
-func (db *VersionedDB) AtVersion(version uint64) (tmdb.DB, error) {
-	if version <= 0 {
-		return nil, tmdb.ErrVersionDoesNotExist
-	}
-	// allows AtVersion(current), desired? todo
-	if version == db.CurrentVersion() {
-		return &db.MemDB, nil
-	}
-	return &MemDB{btree: db.saved[version-1]}, nil
-}
-
-// Uses BTree's Clone() method to make a CoW clone of the current data
-func (db *VersionedDB) SaveVersion() uint64 {
-	db.MemDB.mtx.Lock()
-	defer db.MemDB.mtx.Unlock()
-	id := db.CurrentVersion()
-	db.saved = append(db.saved, db.btree)
-	db.MemDB.btree = db.btree.Clone()
-	return id
 }

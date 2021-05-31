@@ -30,18 +30,19 @@ func BenchmarkMemDBRandomReadsWrites(b *testing.B) {
 }
 
 func TestVersioning(t *testing.T) {
-	db := NewVersionedDB()
-	defer db.Close()
+	conn := NewDB()
+	defer conn.Close()
 
+	db := conn.NewWriter()
 	db.Set([]byte("0"), []byte("a"))
 	db.Set([]byte("1"), []byte("b"))
-	id := db.SaveVersion()
+	id := conn.SaveVersion()
 
 	db.Set([]byte("0"), []byte("c"))
 	db.Delete([]byte("1"))
 	db.Set([]byte("2"), []byte("c"))
 
-	view, err := db.AtVersion(id)
+	view, err := conn.NewReaderAt(id)
 	require.NoError(t, err)
 
 	val, err := view.Get([]byte("0"))
