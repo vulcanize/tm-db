@@ -2,25 +2,40 @@ package badgerdb
 
 import (
 	"bytes"
-	"fmt"
+	"encoding/csv"
 	"os"
 	"path/filepath"
+	"strconv"
+	"sync"
 
 	"github.com/dgraph-io/badger/v2"
 	tmdb "github.com/tendermint/tm-db"
 )
 
+var (
+	versionsFilename string = "versions.csv"
+)
+
+type BadgerDB struct {
+	db       *badger.DB
+	versions []uint64
+	mtx      sync.RWMutex
+}
+
+type badgerTxn struct {
+	txn *badger.Txn
+}
+
 // NewDB creates a Badger key-value store backed to the
 // directory dir supplied. If dir does not exist, it will be created.
-func NewDB(dbName, dir string) (*BadgerDB, error) {
+func NewDB(dir string) (*BadgerDB, error) {
 	// Since Badger doesn't support database names, we join both to obtain
 	// the final directory to use for the database.
-	path := filepath.Join(dir, dbName)
-
-	if err := os.MkdirAll(path, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, err
 	}
-	opts := badger.DefaultOptions(path)
+	opts := badger.DefaultOptions(dir)
+	// todo: NumVersionsToKeep
 	opts.SyncWrites = false // note that we have Sync methods
 	opts.Logger = nil       // badger is too chatty by default
 	return NewDBWithOptions(opts)
@@ -30,129 +45,167 @@ func NewDB(dbName, dir string) (*BadgerDB, error) {
 // gives the flexibility of initializing a database with the
 // respective options.
 func NewDBWithOptions(opts badger.Options) (*BadgerDB, error) {
-	db, err := badger.Open(opts)
+	db, err := badger.OpenManaged(opts)
 	if err != nil {
 		return nil, err
 	}
-	return &BadgerDB{db: db}, nil
+	versions, err := readVersionsFile(filepath.Join(opts.Dir, versionsFilename))
+	if err != nil {
+		return nil, err
+	}
+	return &BadgerDB{
+		db:       db,
+		versions: versions,
+	}, nil
 }
 
-type BadgerDB struct {
-	db *badger.DB
+// Load a CSV file containing valid versions
+func readVersionsFile(path string) ([]uint64, error) {
+	var ret []uint64
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		return ret, err
+	}
+	r := csv.NewReader(file)
+	r.FieldsPerRecord = 1
+	rows, err := r.ReadAll()
+	if err != nil {
+		return ret, err
+	}
+	for _, row := range rows {
+		version, err := strconv.ParseUint(row[0], 10, 64)
+		if err != nil {
+			return ret, err
+		}
+		ret = append(ret, version)
+	}
+	return ret, nil
 }
 
 var _ tmdb.DB = (*BadgerDB)(nil)
+var _ tmdb.DBReader = (*badgerTxn)(nil)
+var _ tmdb.DBWriter = (*badgerTxn)(nil)
 
-func (b *BadgerDB) Get(key []byte) ([]byte, error) {
-	if len(key) == 0 {
-		return nil, tmdb.ErrKeyEmpty
+func (b *BadgerDB) NewReaderAt(version uint64) (tmdb.DBReader, error) {
+	if version == 0 {
+		version = b.CurrentVersion()
 	}
-	var val []byte
-	err := b.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(key)
-		if err == badger.ErrKeyNotFound {
-			return nil
-		} else if err != nil {
-			return err
-		}
-		val, err = item.ValueCopy(nil)
-		if err == nil && val == nil {
-			val = []byte{}
-		}
-		return err
-	})
-	return val, err
+	return &badgerTxn{txn: b.db.NewTransactionAt(version, false)}, nil
 }
 
-func (b *BadgerDB) Has(key []byte) (bool, error) {
-	if len(key) == 0 {
-		return false, tmdb.ErrKeyEmpty
-	}
-	var found bool
-	err := b.db.View(func(txn *badger.Txn) error {
-		_, err := txn.Get(key)
-		if err != nil && err != badger.ErrKeyNotFound {
-			return err
-		}
-		found = (err != badger.ErrKeyNotFound)
-		return nil
-	})
-	return found, err
-}
-
-func (b *BadgerDB) Set(key, value []byte) error {
-	if len(key) == 0 {
-		return tmdb.ErrKeyEmpty
-	}
-	if value == nil {
-		return tmdb.ErrValueNil
-	}
-	return b.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(key, value)
-	})
-}
-
-func withSync(db *badger.DB, err error) error {
-	if err != nil {
-		return err
-	}
-	return db.Sync()
-}
-
-func (b *BadgerDB) SetSync(key, value []byte) error {
-	return withSync(b.db, b.Set(key, value))
-}
-
-func (b *BadgerDB) Delete(key []byte) error {
-	if len(key) == 0 {
-		return tmdb.ErrKeyEmpty
-	}
-	return b.db.Update(func(txn *badger.Txn) error {
-		return txn.Delete(key)
-	})
-}
-
-func (b *BadgerDB) DeleteSync(key []byte) error {
-	return withSync(b.db, b.Delete(key))
+func (b *BadgerDB) NewWriter() tmdb.DBWriter {
+	return &badgerTxn{txn: b.db.NewTransactionAt(b.CurrentVersion(), true)}
 }
 
 func (b *BadgerDB) Close() error {
 	return b.db.Close()
 }
 
-func (b *BadgerDB) Print() error {
-	return nil
+func (b *BadgerDB) CurrentVersion() uint64 {
+	b.mtx.RLock()
+	defer b.mtx.RUnlock()
+	if len(b.versions) == 0 {
+		return b.InitialVersion()
+	}
+	return b.versions[len(b.versions)-1] + 1
 }
 
-func (b *BadgerDB) iteratorOpts(start, end []byte, opts badger.IteratorOptions) (*badgerDBIterator, error) {
+func (b *BadgerDB) InitialVersion() uint64 {
+	b.mtx.RLock()
+	defer b.mtx.RUnlock()
+	if len(b.versions) == 0 {
+		return 1
+	}
+	return b.versions[0]
+}
+
+func (b *BadgerDB) SaveVersion() uint64 {
+	// TODO: wait on any pending txns
+	b.mtx.Lock()
+	defer b.mtx.Unlock()
+	id := b.CurrentVersion()
+	b.versions = append(b.versions, id)
+	return id
+}
+
+func (b *badgerTxn) Get(key []byte) ([]byte, error) {
+	if len(key) == 0 {
+		return nil, tmdb.ErrKeyEmpty
+	}
+
+	item, err := b.txn.Get(key)
+	if err == badger.ErrKeyNotFound {
+		// panic("foo!")
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	val, err := item.ValueCopy(nil)
+	if err == nil && val == nil {
+		val = []byte{}
+	}
+	return val, err
+}
+
+func (b *badgerTxn) Has(key []byte) (bool, error) {
+	if len(key) == 0 {
+		return false, tmdb.ErrKeyEmpty
+	}
+
+	_, err := b.txn.Get(key)
+	if err != nil && err != badger.ErrKeyNotFound {
+		return false, err
+	}
+	return (err != badger.ErrKeyNotFound), nil
+}
+
+func (b *badgerTxn) Set(key, value []byte) error {
+	if len(key) == 0 {
+		return tmdb.ErrKeyEmpty
+	}
+	if value == nil {
+		return tmdb.ErrValueNil
+	}
+	return b.txn.Set(key, value)
+}
+
+func (b *badgerTxn) Delete(key []byte) error {
+	if len(key) == 0 {
+		return tmdb.ErrKeyEmpty
+	}
+	return b.txn.Delete(key)
+}
+
+func (b *badgerTxn) Commit() error {
+	// All commits write to the same (current) version until next SaveVersion() call
+	return b.txn.CommitAt(b.txn.ReadTs(), nil)
+}
+
+func (b *badgerTxn) iteratorOpts(start, end []byte, opts badger.IteratorOptions) (*badgerDBIterator, error) {
 	if (start != nil && len(start) == 0) || (end != nil && len(end) == 0) {
 		return nil, tmdb.ErrKeyEmpty
 	}
-	txn := b.db.NewTransaction(false)
-	iter := txn.NewIterator(opts)
+	iter := b.txn.NewIterator(opts)
 	iter.Rewind()
 	iter.Seek(start)
 	if opts.Reverse && iter.Valid() && bytes.Equal(iter.Item().Key(), start) {
-		// If we're going in reverse, our starting point was "end",
-		// which is exclusive.
+		// If we're going in reverse, our starting point was "end", which is exclusive.
 		iter.Next()
 	}
 	return &badgerDBIterator{
 		reverse: opts.Reverse,
 		start:   start,
 		end:     end,
-
-		txn:  txn,
-		iter: iter,
+		iter:    iter,
 	}, nil
 }
 
-func (b *BadgerDB) Iterator(start, end []byte) (tmdb.Iterator, error) {
+func (b *badgerTxn) Iterator(start, end []byte) (tmdb.Iterator, error) {
 	opts := badger.DefaultIteratorOptions
 	return b.iteratorOpts(start, end, opts)
 }
 
-func (b *BadgerDB) ReverseIterator(start, end []byte) (tmdb.Iterator, error) {
+func (b *badgerTxn) ReverseIterator(start, end []byte) (tmdb.Iterator, error) {
 	opts := badger.DefaultIteratorOptions
 	opts.Reverse = true
 	return b.iteratorOpts(end, start, opts)
@@ -162,75 +215,10 @@ func (b *BadgerDB) Stats() map[string]string {
 	return nil
 }
 
-func (b *BadgerDB) NewBatch() tmdb.Batch {
-	wb := &badgerDBBatch{
-		db:         b.db,
-		wb:         b.db.NewWriteBatch(),
-		firstFlush: make(chan struct{}, 1),
-	}
-	wb.firstFlush <- struct{}{}
-	return wb
-}
-
-var _ tmdb.Batch = (*badgerDBBatch)(nil)
-
-type badgerDBBatch struct {
-	db *badger.DB
-	wb *badger.WriteBatch
-
-	// Calling db.Flush twice panics, so we must keep track of whether we've
-	// flushed already on our own. If Write can receive from the firstFlush
-	// channel, then it's the first and only Flush call we should do.
-	//
-	// Upstream bug report:
-	// https://github.com/dgraph-io/badger/issues/1394
-	firstFlush chan struct{}
-}
-
-func (b *badgerDBBatch) Set(key, value []byte) error {
-	if len(key) == 0 {
-		return tmdb.ErrKeyEmpty
-	}
-	if value == nil {
-		return tmdb.ErrValueNil
-	}
-	return b.wb.Set(key, value)
-}
-
-func (b *badgerDBBatch) Delete(key []byte) error {
-	if len(key) == 0 {
-		return tmdb.ErrKeyEmpty
-	}
-	return b.wb.Delete(key)
-}
-
-func (b *badgerDBBatch) Write() error {
-	select {
-	case <-b.firstFlush:
-		return b.wb.Flush()
-	default:
-		return fmt.Errorf("batch already flushed")
-	}
-}
-
-func (b *badgerDBBatch) WriteSync() error {
-	return withSync(b.db, b.Write())
-}
-
-func (b *badgerDBBatch) Close() error {
-	select {
-	case <-b.firstFlush: // a Flush after Cancel panics too
-	default:
-	}
-	b.wb.Cancel()
-	return nil
-}
-
 type badgerDBIterator struct {
 	reverse    bool
 	start, end []byte
 
-	txn  *badger.Txn
 	iter *badger.Iterator
 
 	lastErr error
@@ -238,7 +226,6 @@ type badgerDBIterator struct {
 
 func (i *badgerDBIterator) Close() error {
 	i.iter.Close()
-	i.txn.Discard()
 	return nil
 }
 
@@ -270,8 +257,6 @@ func (i *badgerDBIterator) Key() []byte {
 	if !i.Valid() {
 		panic("iterator is invalid")
 	}
-	// Note that we don't use KeyCopy, so this is only valid until the next
-	// call to Next.
 	return i.iter.Item().KeyCopy(nil)
 }
 
