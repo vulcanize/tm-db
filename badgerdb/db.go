@@ -231,7 +231,7 @@ func (b *badgerTxn) Commit() error {
 	return b.txn.CommitAt(b.txn.ReadTs(), nil)
 }
 
-func (b *badgerTxn) Discard() { b.Discard() }
+func (b *badgerTxn) Discard() { b.txn.Discard() }
 
 func (b *badgerTxn) iteratorOpts(start, end []byte, opts badger.IteratorOptions) (*badgerDBIterator, error) {
 	if (start != nil && len(start) == 0) || (end != nil && len(end) == 0) {

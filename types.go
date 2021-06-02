@@ -82,10 +82,6 @@ type DBReader interface {
 	// CONTRACT: start, end readonly []byte
 	ReverseIterator(start, end []byte) (Iterator, error)
 
-	// Flushes pending writes and discards the transaction.
-	// No-op for read-only transaction.
-	Commit() error
-
 	// Discards the transaction, invalidating any future operations on it.
 	Discard()
 }
@@ -101,6 +97,10 @@ type DBWriter interface {
 	// Delete deletes the key, or does nothing if the key does not exist.
 	// CONTRACT: key readonly []byte
 	Delete([]byte) error
+
+	// Flushes pending writes and discards the transaction.
+	// TODO: maybe change to Flush() and follow WriteBatch semantics (ie. don't discard)
+	Commit() error
 }
 
 // Iterator represents an iterator over a domain of keys. Callers must call Close when done.

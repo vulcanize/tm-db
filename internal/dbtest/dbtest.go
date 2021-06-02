@@ -205,11 +205,6 @@ func BenchmarkRandomReadsWrites(b *testing.B, db tmdb.DBWriter) {
 	}
 }
 
-func commit(t *testing.T, txn tmdb.DBReader) {
-	err := txn.Commit()
-	require.NoError(t, err)
-}
-
 func TestGetSetHasDelete(t *testing.T, conn tmdb.DB) {
 	{
 		txn, err := conn.NewReaderAt(conn.CurrentVersion())
@@ -224,7 +219,7 @@ func TestGetSetHasDelete(t *testing.T, conn tmdb.DB) {
 		require.NoError(t, err)
 		require.False(t, ok)
 
-		commit(t, txn)
+		txn.Discard()
 	}
 
 	{
@@ -257,11 +252,10 @@ func TestGetSetHasDelete(t *testing.T, conn tmdb.DB) {
 		err = txn.Set([]byte("b"), []byte{0x02})
 		require.NoError(t, err)
 
-		commit(t, txn)
+		require.NoError(t, txn.Commit())
 	}
 
 	txn := conn.NewWriter()
-	defer commit(t, txn)
 
 	// Get a committed value.
 	value, err := txn.Get([]byte("b"))
@@ -299,6 +293,8 @@ func TestGetSetHasDelete(t *testing.T, conn tmdb.DB) {
 	value, err = txn.Get([]byte("x"))
 	require.NoError(t, err)
 	require.Equal(t, []byte{}, value)
+
+	require.NoError(t, txn.Commit())
 }
 
 func TestVersioning(t *testing.T, conn tmdb.DB) {
@@ -314,6 +310,7 @@ func TestVersioning(t *testing.T, conn tmdb.DB) {
 
 	view, err := conn.NewReaderAt(id)
 	require.NoError(t, err)
+	defer view.Discard()
 
 	val, err := view.Get([]byte("0"))
 	require.Equal(t, []byte("a"), val)

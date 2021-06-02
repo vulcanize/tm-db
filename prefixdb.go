@@ -86,9 +86,6 @@ func (pdb *PrefixReader) ReverseIterator(start, end []byte) (Iterator, error) {
 	return newPrefixIterator(pdb.prefix, start, end, ritr)
 }
 
-// Commit implements DBReader.
-func (pdb *PrefixReader) Commit() error { return pdb.db.Commit() }
-
 // Discard implements DBReader.
 func (pdb *PrefixReader) Discard() { pdb.db.Discard() }
 
