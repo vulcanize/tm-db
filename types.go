@@ -21,25 +21,22 @@ var (
 // Past versions are read-only
 // TODO: rename to Connection?
 type DB interface {
-	// Open a read-only transaction at a specified version
+	// Opens a read-only transaction at a specified version.
 	NewReaderAt(uint64) (DBReader, error)
 
-	// Open a read-write transaction at the current version
+	// Opens a read-write transaction at the current version.
 	NewWriter() DBWriter
 
-	// ID of current version of database contents
+	// Returns ID of current version of database contents.
 	CurrentVersion() uint64
 
-	// ID of first saved version of database
+	// Returns ID of first saved version of database.
 	InitialVersion() uint64
 
-	// Save the current version of the database and return its ID
-	// TODO: design q's
-	// 1. DBWriter.Commit() saves versions
-	//    - with multiple writers, version sequence could go out of sync
-	// 2. SaveVersion() only
-	//    - must wait until outstanding txns complete
-	//    - version sequence well defined, easier to reason about
+	// Saves the current version of the database and returns its ID.
+	// TODO: either
+	// * Waits for any pending RW transactions to be discarded.
+	// - Calls Discard() on any pending transactions. (or only RW txns?)
 	SaveVersion() uint64
 
 	// Print is used for debugging.
@@ -85,9 +82,12 @@ type DBReader interface {
 	// CONTRACT: start, end readonly []byte
 	ReverseIterator(start, end []byte) (Iterator, error)
 
-	// Commit and close the transaction. No-op for read-only batch.
-	// TODO: move to ReadWriter? replace with Discard() or equiv?
+	// Flushes pending writes and discards the transaction.
+	// No-op for read-only transaction.
 	Commit() error
+
+	// Discards the transaction, invalidating any future operations on it.
+	Discard()
 }
 
 // A batch/transaction that is also capable of writing to the backing DB.

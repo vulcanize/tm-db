@@ -43,15 +43,14 @@ func newPair(key, value []byte) *item {
 // database, so modifying them will cause the stored values to be modified as well. All DB methods
 // already specify that keys and values should be considered read-only, but this is especially
 // important with MemDB.
-type dbVersion struct {
-	mtx   sync.RWMutex
-	btree *btree.BTree
-}
-
-// Naive implementation of versioned DB for testing purposes
 type MemDB struct {
 	dbVersion
 	saved []*btree.BTree
+}
+
+type dbVersion struct {
+	mtx   sync.RWMutex
+	btree *btree.BTree
 }
 
 var _ tmdb.DB = (*MemDB)(nil)
@@ -80,7 +79,7 @@ func (db *MemDB) CurrentVersion() uint64 {
 }
 
 func (db *MemDB) NewReaderAt(version uint64) (tmdb.DBReader, error) {
-	if version <= 0 {
+	if version == 0 {
 		return nil, tmdb.ErrVersionDoesNotExist
 	}
 	// allows AtVersion(current), desired? todo
@@ -189,6 +188,7 @@ func (db *dbVersion) Commit() error {
 	// no-op, like Close()
 	return nil
 }
+func (db *dbVersion) Discard() {}
 
 // Print implements DB.
 func (db *MemDB) Print() error {

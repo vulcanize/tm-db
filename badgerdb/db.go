@@ -135,7 +135,6 @@ func (b *badgerTxn) Get(key []byte) ([]byte, error) {
 
 	item, err := b.txn.Get(key)
 	if err == badger.ErrKeyNotFound {
-		// panic("foo!")
 		return nil, nil
 	} else if err != nil {
 		return nil, err
@@ -180,6 +179,8 @@ func (b *badgerTxn) Commit() error {
 	// All commits write to the same (current) version until next SaveVersion() call
 	return b.txn.CommitAt(b.txn.ReadTs(), nil)
 }
+
+func (b *badgerTxn) Discard() { b.Discard() }
 
 func (b *badgerTxn) iteratorOpts(start, end []byte, opts badger.IteratorOptions) (*badgerDBIterator, error) {
 	if (start != nil && len(start) == 0) || (end != nil && len(end) == 0) {
