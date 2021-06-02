@@ -8,8 +8,9 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/dgraph-io/badger/v2"
 	tmdb "github.com/tendermint/tm-db"
+
+	"github.com/dgraph-io/badger/v3"
 )
 
 var (
@@ -17,9 +18,18 @@ var (
 )
 
 type BadgerDB struct {
-	db       *badger.DB
+	db   *badger.DB
+	vmgr versionManager
+	mtx  sync.RWMutex
+}
+
+var _ tmdb.DB = (*BadgerDB)(nil)
+var _ tmdb.DBReader = (*badgerTxn)(nil)
+var _ tmdb.DBWriter = (*badgerTxn)(nil)
+
+// Encapsulates valid, current, initial versions
+type versionManager struct {
 	versions []uint64
-	mtx      sync.RWMutex
 }
 
 type badgerTxn struct {
@@ -49,23 +59,24 @@ func NewDBWithOptions(opts badger.Options) (*BadgerDB, error) {
 	if err != nil {
 		return nil, err
 	}
-	versions, err := readVersionsFile(filepath.Join(opts.Dir, versionsFilename))
+	vmgr, err := readVersionsFile(filepath.Join(opts.Dir, versionsFilename))
 	if err != nil {
 		return nil, err
 	}
 	return &BadgerDB{
-		db:       db,
-		versions: versions,
+		db:   db,
+		vmgr: vmgr,
 	}, nil
 }
 
-// Load a CSV file containing valid versions
-func readVersionsFile(path string) ([]uint64, error) {
-	var ret []uint64
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
+// Load metadata CSV file containing valid versions
+func readVersionsFile(path string) (versionManager, error) {
+	var ret versionManager
+	file, err := os.OpenFile(path, os.O_RDONLY|os.O_CREATE, 0644)
 	if err != nil {
 		return ret, err
 	}
+	defer file.Close()
 	r := csv.NewReader(file)
 	r.FieldsPerRecord = 1
 	rows, err := r.ReadAll()
@@ -77,55 +88,95 @@ func readVersionsFile(path string) ([]uint64, error) {
 		if err != nil {
 			return ret, err
 		}
-		ret = append(ret, version)
+		ret.versions = append(ret.versions, version)
 	}
 	return ret, nil
 }
 
-var _ tmdb.DB = (*BadgerDB)(nil)
-var _ tmdb.DBReader = (*badgerTxn)(nil)
-var _ tmdb.DBWriter = (*badgerTxn)(nil)
+// Write version metadata to CSV file
+func (vm *versionManager) writeVersionsFile(path string) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	w := csv.NewWriter(file)
+	var rows [][]string
+	for _, ver := range vm.versions {
+		rows = append(rows, []string{strconv.FormatUint(ver, 10)})
+	}
+	return w.WriteAll(rows)
+}
+
+func (vm *versionManager) valid(version uint64) bool {
+	if version == vm.current() {
+		return true
+	}
+	// todo: maybe use map to avoid linear search
+	for _, ver := range vm.versions {
+		if ver == version {
+			return true
+		}
+	}
+	return false
+}
+func (vm *versionManager) initial() uint64 {
+	if len(vm.versions) == 0 {
+		return 1
+	}
+	return vm.versions[0]
+}
+func (vm *versionManager) current() uint64 {
+	if len(vm.versions) == 0 {
+		return vm.initial()
+	}
+	return vm.versions[len(vm.versions)-1] + 1
+}
+func (vm *versionManager) save() uint64 {
+	id := vm.current()
+	vm.versions = append(vm.versions, id)
+	return id
+}
 
 func (b *BadgerDB) NewReaderAt(version uint64) (tmdb.DBReader, error) {
-	if version == 0 {
-		version = b.CurrentVersion()
+	b.mtx.RLock()
+	defer b.mtx.RUnlock()
+	if !b.vmgr.valid(version) {
+		return nil, tmdb.ErrVersionDoesNotExist
 	}
 	return &badgerTxn{txn: b.db.NewTransactionAt(version, false)}, nil
 }
 
 func (b *BadgerDB) NewWriter() tmdb.DBWriter {
-	return &badgerTxn{txn: b.db.NewTransactionAt(b.CurrentVersion(), true)}
+	b.mtx.RLock()
+	defer b.mtx.RUnlock()
+	return &badgerTxn{txn: b.db.NewTransactionAt(b.vmgr.current(), true)}
 }
 
 func (b *BadgerDB) Close() error {
+	b.mtx.Lock()
+	defer b.mtx.Unlock()
+	b.vmgr.writeVersionsFile(filepath.Join(b.db.Opts().Dir, versionsFilename))
 	return b.db.Close()
 }
 
 func (b *BadgerDB) CurrentVersion() uint64 {
 	b.mtx.RLock()
 	defer b.mtx.RUnlock()
-	if len(b.versions) == 0 {
-		return b.InitialVersion()
-	}
-	return b.versions[len(b.versions)-1] + 1
+	return b.vmgr.current()
 }
 
 func (b *BadgerDB) InitialVersion() uint64 {
 	b.mtx.RLock()
 	defer b.mtx.RUnlock()
-	if len(b.versions) == 0 {
-		return 1
-	}
-	return b.versions[0]
+	return b.vmgr.initial()
 }
 
 func (b *BadgerDB) SaveVersion() uint64 {
 	// TODO: wait on any pending txns
 	b.mtx.Lock()
 	defer b.mtx.Unlock()
-	id := b.CurrentVersion()
-	b.versions = append(b.versions, id)
-	return id
+	return b.vmgr.save()
 }
 
 func (b *badgerTxn) Get(key []byte) ([]byte, error) {

@@ -204,3 +204,135 @@ func BenchmarkRandomReadsWrites(b *testing.B, db tmdb.DBWriter) {
 
 	}
 }
+
+func commit(t *testing.T, txn tmdb.DBReader) {
+	err := txn.Commit()
+	require.NoError(t, err)
+}
+
+func TestGetSetHasDelete(t *testing.T, conn tmdb.DB) {
+	{
+		txn, err := conn.NewReaderAt(conn.CurrentVersion())
+		require.NoError(t, err)
+
+		// A nonexistent key should return nil.
+		value, err := txn.Get([]byte("a"))
+		require.NoError(t, err)
+		require.Nil(t, value)
+
+		ok, err := txn.Has([]byte("a"))
+		require.NoError(t, err)
+		require.False(t, ok)
+
+		commit(t, txn)
+	}
+
+	{
+		txn := conn.NewWriter()
+
+		// Set and get a value.
+		err := txn.Set([]byte("a"), []byte{0x01})
+		require.NoError(t, err)
+
+		ok, err := txn.Has([]byte("a"))
+		require.NoError(t, err)
+		require.True(t, ok)
+
+		value, err := txn.Get([]byte("a"))
+		require.NoError(t, err)
+		require.Equal(t, []byte{0x01}, value)
+
+		// Deleting a non-existent value is fine.
+		err = txn.Delete([]byte("x"))
+		require.NoError(t, err)
+
+		// Delete a value.
+		err = txn.Delete([]byte("a"))
+		require.NoError(t, err)
+
+		value, err = txn.Get([]byte("a"))
+		require.NoError(t, err)
+		require.Nil(t, value)
+
+		err = txn.Set([]byte("b"), []byte{0x02})
+		require.NoError(t, err)
+
+		commit(t, txn)
+	}
+
+	txn := conn.NewWriter()
+	defer commit(t, txn)
+
+	// Get a committed value.
+	value, err := txn.Get([]byte("b"))
+	require.NoError(t, err)
+	require.Equal(t, []byte{0x02}, value)
+
+	// Setting, getting, and deleting an empty key should error.
+	_, err = txn.Get([]byte{})
+	require.Equal(t, tmdb.ErrKeyEmpty, err)
+	_, err = txn.Get(nil)
+	require.Equal(t, tmdb.ErrKeyEmpty, err)
+
+	_, err = txn.Has([]byte{})
+	require.Equal(t, tmdb.ErrKeyEmpty, err)
+	_, err = txn.Has(nil)
+	require.Equal(t, tmdb.ErrKeyEmpty, err)
+
+	err = txn.Set([]byte{}, []byte{0x01})
+	require.Equal(t, tmdb.ErrKeyEmpty, err)
+	err = txn.Set(nil, []byte{0x01})
+	require.Equal(t, tmdb.ErrKeyEmpty, err)
+
+	err = txn.Delete([]byte{})
+	require.Equal(t, tmdb.ErrKeyEmpty, err)
+	err = txn.Delete(nil)
+	require.Equal(t, tmdb.ErrKeyEmpty, err)
+
+	// Setting a nil value should error, but an empty value is fine.
+	err = txn.Set([]byte("x"), nil)
+	require.Equal(t, tmdb.ErrValueNil, err)
+
+	err = txn.Set([]byte("x"), []byte{})
+	require.NoError(t, err)
+
+	value, err = txn.Get([]byte("x"))
+	require.NoError(t, err)
+	require.Equal(t, []byte{}, value)
+}
+
+func TestVersioning(t *testing.T, conn tmdb.DB) {
+	db := conn.NewWriter()
+	db.Set([]byte("0"), []byte("a"))
+	db.Set([]byte("1"), []byte("b"))
+	db.Commit()
+	id := conn.SaveVersion()
+
+	db.Set([]byte("0"), []byte("c"))
+	db.Delete([]byte("1"))
+	db.Set([]byte("2"), []byte("c"))
+
+	view, err := conn.NewReaderAt(id)
+	require.NoError(t, err)
+
+	val, err := view.Get([]byte("0"))
+	require.Equal(t, []byte("a"), val)
+	require.NoError(t, err)
+	val, err = view.Get([]byte("1"))
+	require.Equal(t, []byte("b"), val)
+	require.NoError(t, err)
+
+	has, err := view.Has([]byte("2"))
+	require.False(t, has)
+
+	it, err := view.Iterator(nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, []byte("0"), it.Key())
+	require.Equal(t, []byte("a"), it.Value())
+	it.Next()
+	require.Equal(t, []byte("1"), it.Key())
+	require.Equal(t, []byte("b"), it.Value())
+	it.Next()
+	require.False(t, it.Valid())
+	it.Close()
+}
